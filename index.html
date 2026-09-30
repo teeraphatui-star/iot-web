@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PC Monitor Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&display=swap');
+        .font-digital { font-family: 'Orbitron', sans-serif; }
+    </style>
+</head>
+<body class="bg-gray-900 text-white min-h-screen flex items-center justify-center p-6">
+    <div class="w-full max-w-5xl">
+        <h1 class="text-4xl font-bold text-center mb-10 text-cyan-400 tracking-[0.2em] drop-shadow-md">
+            PC HARDWARE MONITOR
+        </h1>
+        
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+            <!-- อุณหภูมิ -->
+            <div class="bg-gray-800 p-6 rounded-2xl shadow-2xl border border-gray-700 flex flex-col items-center transform transition duration-300 hover:scale-105">
+                <h2 class="text-gray-400 text-sm uppercase tracking-widest mb-4">Temperature</h2>
+                <div class="flex items-baseline font-digital">
+                    <span id="temp" class="text-5xl font-extrabold text-orange-500">0.0</span>
+                    <span class="ml-2 text-2xl text-gray-500">°C</span>
+                </div>
+            </div>
+
+            <!-- ความชื้น -->
+            <div class="bg-gray-800 p-6 rounded-2xl shadow-2xl border border-gray-700 flex flex-col items-center transform transition duration-300 hover:scale-105">
+                <h2 class="text-gray-400 text-sm uppercase tracking-widest mb-4">Humidity</h2>
+                <div class="flex items-baseline font-digital">
+                    <span id="hum" class="text-5xl font-extrabold text-blue-400">0.0</span>
+                    <span class="ml-2 text-2xl text-gray-500">%</span>
+                </div>
+            </div>
+
+            <!-- ค่าฝุ่น -->
+            <div class="bg-gray-800 p-6 rounded-2xl shadow-2xl border border-gray-700 flex flex-col items-center transform transition duration-300 hover:scale-105">
+                <h2 class="text-gray-400 text-sm uppercase tracking-widest mb-4">Dust (PM2.5)</h2>
+                <div class="flex items-baseline font-digital">
+                    <span id="dust" class="text-5xl font-extrabold text-green-400">0.00</span>
+                    <span class="ml-2 text-xl text-gray-500">ug/m³</span>
+                </div>
+            </div>
+
+            <!-- ควัน -->
+            <div class="bg-gray-800 p-6 rounded-2xl shadow-2xl border border-gray-700 flex flex-col items-center transform transition duration-300 hover:scale-105">
+                <h2 class="text-gray-400 text-sm uppercase tracking-widest mb-4">Smoke Level</h2>
+                <div class="flex items-baseline font-digital">
+                    <span id="smoke" class="text-5xl font-extrabold text-red-500">0.00</span>
+                    <span class="ml-2 text-xl text-gray-500">ug/m³</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const socket = io();
+        socket.on('sensor_update', (data) => {
+            // อัปเดตตัวเลขแบบ Real-time
+            document.getElementById('temp').innerText = data.temperature.toFixed(1);
+            document.getElementById('hum').innerText = data.humidity.toFixed(1);
+            document.getElementById('dust').innerText = data.pm25.toFixed(2);
+            document.getElementById('smoke').innerText = data.smoke.toFixed(2);
+        });
+    </script>
+</body>
+</html>
