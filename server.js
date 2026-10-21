@@ -47,6 +47,43 @@ async function flush(b) {
     }
 }
 
+// ===== สรุปรายวัน (เวลาไทย) เก็บใน Firestore: daily/{YYYY-MM-DD} =====
+const SMOKE_LIMIT = 80;                        // ให้ตรงกับเฟิร์มแวร์
+const DUST_CUT = [15, 25, 37.5, 75];           // เกณฑ์ฝุ่น 5 ระดับ (ตรงกับเฟิร์มแวร์)
+const thai = ts => new Date(ts + 7 * 3600e3);  // เลื่อนเป็นเวลาไทย แล้วอ่านด้วย getUTC*
+const dayKey = ts => thai(ts).toISOString().slice(0, 10);
+const emptyDay = key => ({ date: key, n: 0, tmin: null, tmax: null, pmin: null, pmax: null,
+    psum: 0, smax: 0, sover: 0, levels: [0, 0, 0, 0, 0], hours: {} });
+let today = emptyDay(dayKey(Date.now()));
+
+async function saveDaily() {
+    if (!db) return;
+    try { await db.collection('daily').doc(today.date).set(today); }
+    catch (e) { console.error('Daily write failed:', e.message); }
+}
+// เซิร์ฟเวอร์รีสตาร์ทกลางวัน -> โหลดสรุปของวันนี้กลับมาต่อ
+if (db) db.collection('daily').doc(today.date).get()
+    .then(s => { if (s.exists && today.n === 0) today = s.data(); })
+    .catch(e => console.error('Daily load failed:', e.message));
+
+function addDaily(d, ts) {
+    const key = dayKey(ts);
+    if (key !== today.date) { saveDaily(); today = emptyDay(key); } // ขึ้นวันใหม่
+    const lo = (a, v) => a === null ? v : Math.min(a, v);
+    const hi = (a, v) => a === null ? v : Math.max(a, v);
+    today.n++;
+    today.tmin = lo(today.tmin, d.temperature); today.tmax = hi(today.tmax, d.temperature);
+    today.pmin = lo(today.pmin, d.pm25);        today.pmax = hi(today.pmax, d.pm25);
+    today.psum += d.pm25;
+    today.smax = Math.max(today.smax, d.smoke);
+    if (d.smoke > SMOKE_LIMIT) today.sover++;
+    today.levels[DUST_CUT.filter(c => d.pm25 > c).length]++;
+    const h = String(thai(ts).getUTCHours());
+    const o = today.hours[h] || (today.hours[h] = { n: 0, tmin: null, tmax: null, psum: 0, pmax: 0, smax: 0 });
+    o.n++; o.tmin = lo(o.tmin, d.temperature); o.tmax = hi(o.tmax, d.temperature);
+    o.psum += d.pm25; o.pmax = Math.max(o.pmax, d.pm25); o.smax = Math.max(o.smax, d.smoke);
+}
+
 // รับข้อมูลจาก ESP32
 app.post('/update', (req, res) => {
     if (API_KEY && req.get('x-api-key') !== API_KEY) {
@@ -60,10 +97,12 @@ app.post('/update', (req, res) => {
     latest = { temperature: d.temperature, humidity: d.humidity, pm25: d.pm25, smoke: d.smoke, ts: Date.now() };
     lastSeen = latest.ts;
     io.emit('sensor_update', latest); // ส่งให้หน้าเว็บแบบเรียลไทม์
+    addDaily(d, latest.ts);           // สะสมสรุปรายวัน
 
     const key = Math.floor(latest.ts / 60000) * 60000;
     if (!bucket || bucket.key !== key) {
         flush(bucket); // ขึ้นนาทีใหม่ -> บันทึกนาทีที่แล้ว
+        saveDaily();   // บันทึกสรุปรายวันลง Firestore (1 เขียน/นาที)
         bucket = { key, n: 0, sum: { temperature: 0, humidity: 0, pm25: 0, smoke: 0 } };
     }
     bucket.n++;
@@ -119,6 +158,25 @@ app.get('/api/export.csv', wrap(async (req, res) => {
         .join('\n');
     res.set({ 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="pc-monitor.csv"' });
     res.send(csv);
+}));
+
+// ===== สรุปรายวัน =====
+const view = s => ({
+    date: s.date, n: s.n,
+    temp: { min: s.tmin, max: s.tmax },
+    dust: { min: s.pmin, max: s.pmax, avg: s.n ? +(s.psum / s.n).toFixed(2) : null },
+    smoke: { max: s.smax, detected: s.sover > 0, percent: s.n ? +(100 * s.sover / s.n).toFixed(1) : 0, limit: SMOKE_LIMIT },
+    levels: s.levels.map(c => s.n ? +(100 * c / s.n).toFixed(1) : 0),
+    hours: s.hours
+});
+// สรุปวันนี้ (อ่านจากหน่วยความจำ ไม่เปลืองโควตา Firestore)
+app.get('/api/summary/today', (req, res) => res.json(view(today)));
+// สรุปย้อนหลังหลายวัน ?n=7
+app.get('/api/summary/days', wrap(async (req, res) => {
+    if (!db) return res.json([]);
+    const n = Math.min(parseInt(req.query.n) || 7, 31);
+    const snap = await db.collection('daily').orderBy('date', 'desc').limit(n).get();
+    res.json(snap.docs.map(d => view(d.data())));
 }));
 
 const PORT = process.env.PORT || 3000;
