@@ -40,6 +40,10 @@
                 PC HARDWARE MONITOR
             </h1>
         </header>
+        <div class="flex justify-center items-center gap-4 mb-8">
+            <span id="status" class="text-xs font-bold px-3 py-1 rounded-full bg-red-500/20 text-red-400">● OFFLINE</span>
+            <a href="/history.html" class="text-sm px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600">ดูประวัติย้อนหลัง</a>
+        </div>
         
         <!-- ส่วนที่ 1: การ์ดแสดงตัวเลขปัจจุบัน -->
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
@@ -86,7 +90,7 @@
                     <div class="bg-green-400/20 p-3 rounded-xl text-green-400">
                         <i class="fa-solid fa-wind text-xl"></i>
                     </div>
-                    <h2 class="text-gray-400 text-sm font-bold tracking-widest uppercase">Dust (PM2.5)</h2>
+                    <h2 class="text-gray-400 text-sm font-bold tracking-widest uppercase">Dust (PM2.5)</h2><span id="dustLevel" class="text-xs font-bold px-2 py-1 rounded-full bg-slate-700 text-gray-400">-</span>
                 </div>
                 <div class="flex items-baseline font-digital z-10">
                     <span id="dust" class="text-5xl font-black text-green-400 drop-shadow-[0_0_10px_rgba(74,222,128,0.4)]">0.00</span>
@@ -107,7 +111,7 @@
                 </div>
                 <div class="flex items-baseline font-digital z-10">
                     <span id="smoke" class="text-5xl font-black text-red-500 drop-shadow-[0_0_10px_rgba(239,68,68,0.4)]">0.00</span>
-                    <span class="ml-2 text-xl text-gray-500">ug/m³</span>
+                    <span class="ml-2 text-xl text-gray-500">ppm</span>
                 </div>
             </div>
         </div>
@@ -199,7 +203,7 @@
                         data: []
                     },
                     {
-                        label: 'Smoke (ug/m³)',
+                        label: 'Smoke (ppm)',
                         borderColor: '#ef4444', 
                         backgroundColor: 'rgba(239, 68, 68, 0.15)',
                         borderWidth: 3,
@@ -224,7 +228,9 @@
 
         // รับค่าจาก Socket.io และอัปเดตหน้าเว็บ
         const socket = io();
-        socket.on('sensor_update', (data) => {
+        function onData(data) {
+            lastSeen = Date.now();
+            setDust(data.pm25);
             // 1. อัปเดตตัวเลขบนการ์ด
             document.getElementById('temp').innerText = data.temperature.toFixed(1);
             document.getElementById('hum').innerText = data.humidity.toFixed(1);
@@ -258,7 +264,31 @@
                 airChart.data.datasets[1].data.shift();
             }
             airChart.update();
-        });
+        }
+        socket.on('sensor_update', onData);
+
+        let lastSeen = 0;
+        // ระดับฝุ่น: Danger เริ่มที่ 150 ตรงกับเกณฑ์แจ้งเตือน Telegram ในเฟิร์มแวร์
+        function setDust(v) {
+            const L = v < 35 ? ['GOOD', 'bg-green-500/20 text-green-400']
+                    : v < 75 ? ['MODERATE', 'bg-yellow-500/20 text-yellow-400']
+                    : v < 150 ? ['WARNING', 'bg-orange-500/20 text-orange-400']
+                    : ['DANGER', 'bg-red-500/20 text-red-400'];
+            const el = document.getElementById('dustLevel');
+            el.textContent = L[0];
+            el.className = 'text-xs font-bold px-2 py-1 rounded-full ' + L[1];
+        }
+        // Online/Offline: ไม่มีข้อมูลเข้ามาเกิน 30 วินาที = Offline
+        setInterval(() => {
+            const on = Date.now() - lastSeen < 30000;
+            const s = document.getElementById('status');
+            s.textContent = on ? '● ONLINE' : '● OFFLINE';
+            s.className = 'text-xs font-bold px-3 py-1 rounded-full ' + (on ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400');
+        }, 2000);
+        // เปิดหน้าเว็บแล้วโชว์ค่าล่าสุดจากเซิร์ฟเวอร์ทันที
+        fetch('/api/latest').then(r => r.json()).then(j => {
+            if (j.latest) { onData(j.latest); lastSeen = j.lastSeen; }
+        }).catch(() => {});
     </script>
 </body>
 </html>
