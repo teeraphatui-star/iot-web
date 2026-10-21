@@ -46,6 +46,17 @@
             <a href="/summary.html" class="text-sm px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600">สรุปรายวัน</a>
         </div>
         
+
+        <!-- ผลคำนวณจาก /api/calc -->
+        <div id="calcBox" class="glass-panel rounded-2xl px-6 py-4 mb-8 flex flex-wrap justify-center gap-x-8 gap-y-2 text-sm text-gray-300">
+            <span>รู้สึกเหมือน <b id="cFeels" class="text-orange-400">-</b></span>
+            <span>อุณหภูมิ <b id="cF" class="text-orange-400">-</b></span>
+            <span>จุดน้ำค้าง <b id="cDew" class="text-blue-400">-</b></span>
+            <span>สถานะอุณหภูมิ <b id="cTempStatus" class="text-gray-100">-</b></span>
+            <span>US AQI <b id="cAqi" class="text-green-400">-</b></span>
+            <span>ระดับฝุ่น <b id="cLevel" class="text-green-400">-</b></span>
+        </div>
+
         <!-- ส่วนที่ 1: การ์ดแสดงตัวเลขปัจจุบัน -->
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
             <!-- อุณหภูมิ -->
@@ -290,6 +301,23 @@
         fetch('/api/latest').then(r => r.json()).then(j => {
             if (j.latest) { onData(j.latest); lastSeen = j.lastSeen; }
         }).catch(() => {});
+
+        // ดึงผลคำนวณจาก /api/calc (อุณหภูมิที่รู้สึกจริง, AQI ฯลฯ)
+        async function loadCalc() {
+            try {
+                const r = await fetch('/api/calc').then(x => x.json());
+                if (r.error) return;
+                const t = r.temperature, d = r.dust;
+                document.getElementById('cFeels').textContent = t.feelsLikeC + ' °C';
+                document.getElementById('cF').textContent = t.fahrenheit + ' °F / ' + t.kelvin + ' K';
+                document.getElementById('cDew').textContent = t.dewPointC + ' °C';
+                document.getElementById('cTempStatus').textContent = t.status;
+                document.getElementById('cAqi').textContent = d.aqi + ' (' + d.aqiLevel + ')';
+                document.getElementById('cLevel').textContent = d.level;
+            } catch (e) {}
+        }
+        loadCalc();
+        setInterval(loadCalc, 5000);
     </script>
 </body>
 </html>
