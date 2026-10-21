@@ -196,6 +196,70 @@ app.get('/api/summary/days', wrap(async (req, res) => {
     res.json(days.reverse().map(view)); // วันล่าสุดอยู่บนสุด
 }));
 
+// ===== API คำนวณ อุณหภูมิ / ฝุ่น =====
+const LEVEL_NAMES = ['ดีมาก', 'ดี', 'ปานกลาง', 'สะสมมาก', 'วิกฤต']; // ตรงกับ DUST_CUT และหน้าสรุปรายวัน
+
+// PM2.5 -> US AQI (มาตรฐาน US EPA)
+const AQI_TABLE = [
+    // [pmต่ำ, pmสูง, aqiต่ำ, aqiสูง, ระดับ AQI]
+    [0,     12.0,  0,   50,  'Good'],
+    [12.1,  35.4,  51,  100, 'Moderate'],
+    [35.5,  55.4,  101, 150, 'Unhealthy for Sensitive Groups'],
+    [55.5,  150.4, 151, 200, 'Unhealthy'],
+    [150.5, 250.4, 201, 300, 'Very Unhealthy'],
+    [250.5, 500.4, 301, 500, 'Hazardous']
+];
+function calcDust(pm) {
+    const c = Math.floor(pm * 10) / 10; // ตัดเหลือ 1 ตำแหน่งตามมาตรฐาน
+    const r = AQI_TABLE.find(x => c >= x[0] && c <= x[1]) || AQI_TABLE[AQI_TABLE.length - 1];
+    const aqi = Math.min(500, Math.round((r[3] - r[2]) / (r[1] - r[0]) * (c - r[0]) + r[2]));
+    return {
+        pm25: +pm.toFixed(2),
+        aqi,
+        aqiLevel: r[4],
+        level: LEVEL_NAMES[DUST_CUT.filter(x => pm > x).length] // ระดับ 5 ขั้นเดียวกับเฟิร์มแวร์
+    };
+}
+
+// อุณหภูมิ: แปลงหน่วย + Heat Index (อุณหภูมิที่รู้สึกจริง) + จุดน้ำค้าง + สถานะ
+function calcTemp(c, rh) {
+    const f = c * 9 / 5 + 32;
+    let hiF = f; // สูตร Rothfusz ใช้ได้เมื่อ >= 80°F
+    if (f >= 80) {
+        hiF = -42.379 + 2.04901523 * f + 10.14333127 * rh - 0.22475541 * f * rh
+            - 0.00683783 * f * f - 0.05481717 * rh * rh + 0.00122874 * f * f * rh
+            + 0.00085282 * f * rh * rh - 0.00000199 * f * f * rh * rh;
+    }
+    // จุดน้ำค้าง (สูตร Magnus)
+    const a = 17.62, b = 243.12;
+    const g = Math.log(Math.max(rh, 0.1) / 100) + a * c / (b + c);
+    const dew = b * g / (a - g);
+    const status = c >= 45 ? 'ร้อนอันตราย' : c >= 35 ? 'ร้อน' : c >= 20 ? 'ปกติ' : 'เย็น';
+    return {
+        celsius: +c.toFixed(1),
+        fahrenheit: +f.toFixed(1),
+        kelvin: +(c + 273.15).toFixed(2),
+        humidity: +rh.toFixed(1),
+        feelsLikeC: +((hiF - 32) * 5 / 9).toFixed(1),
+        dewPointC: +dew.toFixed(1),
+        status
+    };
+}
+
+// GET /api/calc                          -> คำนวณจากค่าล่าสุดของเซนเซอร์
+// GET /api/calc?temp=32&hum=45&pm25=20   -> คำนวณจากค่าที่ส่งมาเอง
+app.get('/api/calc', (req, res) => {
+    const num = (q, fb) => (q !== undefined && q !== '' && isFinite(+q)) ? +q : fb;
+    const temp = num(req.query.temp, latest && latest.temperature);
+    const hum  = num(req.query.hum,  latest && latest.humidity);
+    const pm   = num(req.query.pm25, latest && latest.pm25);
+    if (temp == null || pm == null) return res.status(404).json({ error: 'ยังไม่มีข้อมูล' });
+    res.json({
+        temperature: calcTemp(temp, hum == null ? 50 : hum),
+        dust: calcDust(pm)
+    });
+});
+
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`Server is running on port ${PORT}`);
