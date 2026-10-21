@@ -13,6 +13,7 @@ app.use(express.static('public'));
 // ===== ตั้งค่าผ่าน Environment Variables บน Render =====
 // API_KEY                  : รหัสลับที่ ESP32 ต้องส่งมาใน header x-api-key (ถ้าไม่ตั้ง = ไม่ตรวจ)
 // FIREBASE_SERVICE_ACCOUNT : เนื้อไฟล์ JSON ของ service account ทั้งก้อน
+// FIREBASE_DB_URL          : URL ของ Realtime Database (ไม่ใส่ = ใช้ค่าเริ่มต้นด้านล่าง)
 const API_KEY = process.env.API_KEY;
 const FIELDS = ['temperature', 'humidity', 'pm25', 'smoke'];
 
@@ -20,10 +21,11 @@ let db = null;
 try {
     if (process.env.FIREBASE_SERVICE_ACCOUNT) {
         admin.initializeApp({
-            credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT))
+            credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)),
+            databaseURL: process.env.FIREBASE_DB_URL || 'https://esp32-dht11-monitor-d5e4f-default-rtdb.firebaseio.com'
         });
-        db = admin.firestore();
-        console.log('Firestore connected');
+        db = admin.database();
+        console.log('Realtime Database connected');
     } else {
         console.warn('FIREBASE_SERVICE_ACCOUNT not set: history is disabled');
     }
@@ -31,23 +33,26 @@ try {
     console.error('Firebase init failed:', e.message);
 }
 
+// Realtime Database ไม่รับค่า undefined และไม่เก็บ null -> ล้างก่อนบันทึกทุกครั้ง
+const clean = o => JSON.parse(JSON.stringify(o));
+
 let latest = null;  // ค่าล่าสุดที่ ESP32 ส่งมา
 let lastSeen = 0;   // เวลา (ms) ที่ได้รับข้อมูลล่าสุด
 let bucket = null;  // ตัวสะสมค่าเฉลี่ยของนาทีปัจจุบัน
 
-// บันทึกค่าเฉลี่ยของ 1 นาทีลง Firestore (1 เอกสารต่อนาที ประหยัดโควตาฟรี)
+// บันทึกค่าเฉลี่ยของ 1 นาทีลง readings/{timestamp}
 async function flush(b) {
     if (!db || !b) return;
     const doc = { ts: b.key, n: b.n };
     FIELDS.forEach(k => { doc[k] = +(b.sum[k] / b.n).toFixed(2); });
     try {
-        await db.collection('readings').doc(String(b.key)).set(doc);
+        await db.ref('readings/' + b.key).set(doc);
     } catch (e) {
-        console.error('Firestore write failed:', e.message);
+        console.error('Database write failed:', e.message);
     }
 }
 
-// ===== สรุปรายวัน (เวลาไทย) เก็บใน Firestore: daily/{YYYY-MM-DD} =====
+// ===== สรุปรายวัน (เวลาไทย) เก็บที่ daily/{YYYY-MM-DD} =====
 const SMOKE_LIMIT = 80;                        // ให้ตรงกับเฟิร์มแวร์
 const DUST_CUT = [15, 25, 37.5, 75];           // เกณฑ์ฝุ่น 5 ระดับ (ตรงกับเฟิร์มแวร์)
 const thai = ts => new Date(ts + 7 * 3600e3);  // เลื่อนเป็นเวลาไทย แล้วอ่านด้วย getUTC*
@@ -58,19 +63,30 @@ let today = emptyDay(dayKey(Date.now()));
 
 async function saveDaily() {
     if (!db) return;
-    try { await db.collection('daily').doc(today.date).set(today); }
+    try { await db.ref('daily/' + today.date).set(clean(today)); }
     catch (e) { console.error('Daily write failed:', e.message); }
 }
+
+// Realtime Database อาจคืน hours เป็น array (ถ้าคีย์เป็นเลขเรียงกัน) -> แปลงกลับเป็น object
+function fromDb(v, key) {
+    const d = Object.assign(emptyDay(key), v);
+    const hours = {};
+    Object.keys(d.hours || {}).forEach(h => { if (d.hours[h]) hours[h] = d.hours[h]; });
+    d.hours = hours;
+    d.levels = [0, 1, 2, 3, 4].map(i => (d.levels && d.levels[i]) || 0);
+    return d;
+}
+
 // เซิร์ฟเวอร์รีสตาร์ทกลางวัน -> โหลดสรุปของวันนี้กลับมาต่อ
-if (db) db.collection('daily').doc(today.date).get()
-    .then(s => { if (s.exists && today.n === 0) today = s.data(); })
+if (db) db.ref('daily/' + today.date).once('value')
+    .then(s => { if (s.exists() && today.n === 0) today = fromDb(s.val(), today.date); })
     .catch(e => console.error('Daily load failed:', e.message));
 
 function addDaily(d, ts) {
     const key = dayKey(ts);
     if (key !== today.date) { saveDaily(); today = emptyDay(key); } // ขึ้นวันใหม่
-    const lo = (a, v) => a === null ? v : Math.min(a, v);
-    const hi = (a, v) => a === null ? v : Math.max(a, v);
+    const lo = (a, v) => a == null ? v : Math.min(a, v);
+    const hi = (a, v) => a == null ? v : Math.max(a, v);
     today.n++;
     today.tmin = lo(today.tmin, d.temperature); today.tmax = hi(today.tmax, d.temperature);
     today.pmin = lo(today.pmin, d.pm25);        today.pmax = hi(today.pmax, d.pm25);
@@ -102,7 +118,7 @@ app.post('/update', (req, res) => {
     const key = Math.floor(latest.ts / 60000) * 60000;
     if (!bucket || bucket.key !== key) {
         flush(bucket); // ขึ้นนาทีใหม่ -> บันทึกนาทีที่แล้ว
-        saveDaily();   // บันทึกสรุปรายวันลง Firestore (1 เขียน/นาที)
+        saveDaily();   // บันทึกสรุปรายวัน (1 ครั้ง/นาที)
         bucket = { key, n: 0, sum: { temperature: 0, humidity: 0, pm25: 0, smoke: 0 } };
     }
     bucket.n++;
@@ -113,16 +129,16 @@ app.post('/update', (req, res) => {
 
 // ===== REST API =====
 const RANGES = { '1h': 3600e3, '6h': 21600e3, '24h': 86400e3 };
-const cache = {}; // แคช 30 วินาที ลดจำนวนการอ่าน Firestore
+const cache = {}; // แคช 30 วินาที ลดจำนวนการอ่านฐานข้อมูล
 
 async function getHistory(range) {
     const r = RANGES[range] ? range : '1h';
     if (!db) return [];
     if (cache[r] && Date.now() - cache[r].at < 30000) return cache[r].rows;
-    const snap = await db.collection('readings')
-        .where('ts', '>=', Date.now() - RANGES[r])
-        .orderBy('ts').limit(1500).get();
-    const rows = snap.docs.map(d => d.data());
+    // คีย์ของ readings คือ timestamp (ms) ความยาวเท่ากัน จึงเรียงและกรองด้วยคีย์ได้
+    const snap = await db.ref('readings').orderByKey()
+        .startAt(String(Date.now() - RANGES[r])).limitToLast(1500).once('value');
+    const rows = Object.values(snap.val() || {}).sort((a, b) => a.ts - b.ts);
     cache[r] = { at: Date.now(), rows };
     return rows;
 }
@@ -169,14 +185,15 @@ const view = s => ({
     levels: s.levels.map(c => s.n ? +(100 * c / s.n).toFixed(1) : 0),
     hours: s.hours
 });
-// สรุปวันนี้ (อ่านจากหน่วยความจำ ไม่เปลืองโควตา Firestore)
+// สรุปวันนี้ (อ่านจากหน่วยความจำ ไม่เปลืองโควตา)
 app.get('/api/summary/today', (req, res) => res.json(view(today)));
 // สรุปย้อนหลังหลายวัน ?n=7
 app.get('/api/summary/days', wrap(async (req, res) => {
     if (!db) return res.json([]);
     const n = Math.min(parseInt(req.query.n) || 7, 31);
-    const snap = await db.collection('daily').orderBy('date', 'desc').limit(n).get();
-    res.json(snap.docs.map(d => view(d.data())));
+    const snap = await db.ref('daily').orderByKey().limitToLast(n).once('value');
+    const days = Object.entries(snap.val() || {}).map(([k, v]) => fromDb(v, k));
+    res.json(days.reverse().map(view)); // วันล่าสุดอยู่บนสุด
 }));
 
 const PORT = process.env.PORT || 3000;
